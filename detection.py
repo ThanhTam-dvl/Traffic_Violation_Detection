@@ -16,7 +16,7 @@ import queue
 class TrafficViolationDetector:
     def __init__(self, model_path='yolov8m.pt'):
         self.model = YOLO(model_path)
-        self.vehicle_classes = {1: 'xe đạp', 2: 'ô tô', 3: 'xe máy', 5: 'xe buýt', 7: 'xe tải'}
+        self.vehicle_classes = {1: 'xe dap', 2: 'o to', 3: 'xe may', 5: 'xe buyt', 7: 'xe tai'}
         self.traffic_light_states = {'red': (0, 0, 255), 'yellow': (0, 255, 255), 'green': (0, 255, 0), 'unknown': (128, 128, 128)}
         self.current_light_state = 'unknown'
         self.last_known_light_state = 'unknown'
@@ -176,7 +176,7 @@ class TrafficViolationDetector:
                 state_color = self.traffic_light_states[state]
                 thickness = 2 if tl == closest_light else 1
                 cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), state_color, thickness)
-                cv2.putText(annotated_frame, f"Đèn tín hiệu: {state}", 
+                cv2.putText(annotated_frame, f"Den tin hieu: {state}", 
                            (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.4, state_color, 1)
         else:
             time_since_last_detection = datetime.now() - self.last_light_detection_time
@@ -243,10 +243,10 @@ class TrafficViolationDetector:
                 (self.red_line['x2'], self.red_line['y2']),
                 (0, 0, 255), 2)
         
-        cv2.putText(frame, "Vạch xanh", 
+        cv2.putText(frame, "Vach xanh", 
                    (self.green_line['x1'], self.green_line['y1'] - 10),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
-        cv2.putText(frame, "Vạch đỏ", 
+        cv2.putText(frame, "Vach do", 
                    (self.red_line['x1'], self.red_line['y1'] - 10),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1)
     
@@ -295,14 +295,14 @@ class TrafficViolationDetector:
                         self.violation_count += 1
                         self.processed_violations.add(vehicle_id)
                 
-                violation_text = "XE VƯỢT ĐÈN ĐỎ"
+                violation_text = "XE VUOT DEN DO"
                 cv2.putText(frame, violation_text, 
                            (x1, y1 - 25), cv2.FONT_HERSHEY_SIMPLEX, 
                            0.6, (0, 0, 255), 1)
                 cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 1)
             
             elif self.vehicle_tracker[vehicle_id]['green_crossed'] and not crossed_red:
-                warning_text = "CẢNH BÁO"
+                warning_text = "CANH BAO"
                 cv2.putText(frame, warning_text, 
                            (x1, y1 - 25), cv2.FONT_HERSHEY_SIMPLEX, 
                            0.6, (0, 255, 255), 1)
@@ -313,7 +313,7 @@ class TrafficViolationDetector:
             if self.vehicle_tracker[vehicle_id].get('violation_time'):
                 time_since_violation = datetime.now() - self.vehicle_tracker[vehicle_id]['violation_time']
                 if time_since_violation.total_seconds() <= self.violation_timeout:
-                    violation_text = "XE VƯỢT ĐÈN ĐỎ"
+                    violation_text = "XE VUOT DEN DO"
                     cv2.putText(frame, violation_text, 
                             (x1, y1 - 25), cv2.FONT_HERSHEY_SIMPLEX, 
                             0.6, (0, 0, 255), 1)
@@ -361,14 +361,14 @@ class TrafficViolationDetector:
         cv2.rectangle(frame, (10, 10), (350, 120), (0, 0, 0), -1)
         
         light_color = self.traffic_light_states[self.current_light_state]
-        cv2.putText(frame, f"Đèn tín hiệu:", (20, 35), 
+        cv2.putText(frame, f"Den tin hieu:", (20, 35), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
         cv2.putText(frame, f"{self.current_light_state.upper()}", (20, 70), 
                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, light_color, 2)
         cv2.circle(frame, (250, 50), 12, light_color, -1)
         cv2.circle(frame, (250, 50), 14, (255, 255, 255), 1)
         
-        cv2.putText(frame, f"Tổng vi phạm:", (20, 100), 
+        cv2.putText(frame, f"Tong vi pham:", (20, 100), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
         cv2.putText(frame, f"{self.violation_count}", (250, 100), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
@@ -536,10 +536,10 @@ class TrafficViolationApp:
         self.info_frame = ttk.Frame(self.main_frame)
         self.info_frame.pack(fill=tk.X, side=tk.BOTTOM, pady=5)
         
-        self.violation_count_label = ttk.Label(self.info_frame, text="Vi phạm: 0")
+        self.violation_count_label = ttk.Label(self.info_frame, text="Vi pham: 0")
         self.violation_count_label.pack(side=tk.LEFT, padx=5)
         
-        self.light_state_label = ttk.Label(self.info_frame, text="Đèn: Chưa xác định")
+        self.light_state_label = ttk.Label(self.info_frame, text="Den: chua xac dinh")
         self.light_state_label.pack(side=tk.LEFT, padx=5)
         
         # Bind canvas events for drawing
