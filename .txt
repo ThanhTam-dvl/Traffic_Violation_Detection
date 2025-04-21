@@ -1,0 +1,20 @@
+# Đường màu đỏ - vùng cảnh báo khi đèn đỏ
+red_line = [(400, 550), (1200, 550)]  # Điều chỉnh theo tọa độ đường đỏ trong hình
+# Đường màu xanh - vùng cảm biến thứ hai để xác định xe đã vượt qua hoàn toàn
+blue_line = [(500, 700), (1200, 700)]  # Điều chỉnh theo tọa độ đường xanh trong hình
+
+
+warning_zone = {
+    'x1': 400,  # Góc trái trên
+    'y1': 550,
+    'x2': 1200,  # Góc phải dưới
+    'y2': 800
+}
+
+
+# Vùng đỏ - ranh giới đầu tiên
+red_line_start = (400, 550)
+red_line_end = (1200, 550)
+# Vùng xanh - ranh giới thứ hai
+blue_line_start = (400, 700)
+blue_line_end = (1200, 700)
