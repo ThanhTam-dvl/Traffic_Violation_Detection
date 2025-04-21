@@ -4,19 +4,25 @@ from ultralytics import YOLO
 from pathlib import Path
 import time
 import csv
+import os
 from datetime import datetime, timedelta
 from collections import deque, defaultdict
+import tkinter as tk
+from tkinter import filedialog, ttk
+from PIL import Image, ImageTk
+import threading
+import queue
 
 class TrafficViolationDetector:
     def __init__(self, model_path='yolov8m.pt'):
         self.model = YOLO(model_path)
-        self.vehicle_classes = {1: 'bicycle', 2: 'car', 3: 'motorcycle', 5: 'bus', 7: 'truck'}
+        self.vehicle_classes = {1: 'xe đạp', 2: 'ô tô', 3: 'xe máy', 5: 'xe buýt', 7: 'xe tải'}
         self.traffic_light_states = {'red': (0, 0, 255), 'yellow': (0, 255, 255), 'green': (0, 255, 0), 'unknown': (128, 128, 128)}
         self.current_light_state = 'unknown'
         self.last_known_light_state = 'unknown'
         self.last_light_detection_time = datetime.now()
         
-        # Define warning zone and lines
+        # Default values for warning zone and lines
         self.warning_zone = {
             'x1': 300, 'y1': 400,  # Top-left corner
             'x2': 1600, 'y2': 800   # Bottom-right corner
@@ -43,14 +49,14 @@ class TrafficViolationDetector:
         self.violation_count = 0
         self.active_violations = set()  # Track currently violating vehicles
         self.processed_violations = set()  # Track violations we've already counted
-        self.violation_timeout = 3  # Reduced timeout to remove warnings faster
+        self.violation_timeout = 7  # Setting timeout to 7 seconds as requested
         
         # Vehicle buffer storage - to better track vehicles between frames
         self.vehicle_buffer = {}
-        self.vehicle_persistence = 10  # Reduced frames for faster cleanup
+        self.vehicle_persistence = 10  # Frames for vehicle tracking
         
         # Debug mode
-        self.debug = True
+        self.debug = False
     
     def detect_vehicles_and_lights(self, frame):
         scale_factor = 1.5
@@ -170,7 +176,7 @@ class TrafficViolationDetector:
                 state_color = self.traffic_light_states[state]
                 thickness = 2 if tl == closest_light else 1
                 cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), state_color, thickness)
-                cv2.putText(annotated_frame, f"Traffic Light: {state}", 
+                cv2.putText(annotated_frame, f"Đèn tín hiệu: {state}", 
                            (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.4, state_color, 1)
         else:
             time_since_last_detection = datetime.now() - self.last_light_detection_time
@@ -237,10 +243,10 @@ class TrafficViolationDetector:
                 (self.red_line['x2'], self.red_line['y2']),
                 (0, 0, 255), 2)
         
-        cv2.putText(frame, "Green Line", 
+        cv2.putText(frame, "Vạch xanh", 
                    (self.green_line['x1'], self.green_line['y1'] - 10),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
-        cv2.putText(frame, "Red Line", 
+        cv2.putText(frame, "Vạch đỏ", 
                    (self.red_line['x1'], self.red_line['y1'] - 10),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1)
     
@@ -249,7 +255,9 @@ class TrafficViolationDetector:
         center_x, center_y = vehicle['center']
         x1, y1, x2, y2 = vehicle['bbox']
         
+        # Update vehicle data
         self.vehicle_tracker[vehicle_id]['last_bbox'] = (x1, y1, x2, y2)
+        self.vehicle_tracker[vehicle_id]['last_seen'] = datetime.now()
         
         if 'green_crossed' not in self.vehicle_tracker[vehicle_id]:
             self.vehicle_tracker[vehicle_id] = {
@@ -260,7 +268,8 @@ class TrafficViolationDetector:
                 'first_seen': datetime.now(),
                 'position_history': [],
                 'last_bbox': (x1, y1, x2, y2),
-                'last_seen': datetime.now()
+                'last_seen': datetime.now(),
+                'violation_time': None
             }
         
         self.vehicle_tracker[vehicle_id]['position_history'].append((center_x, center_y))
@@ -275,9 +284,6 @@ class TrafficViolationDetector:
         if crossed_red:
             self.vehicle_tracker[vehicle_id]['red_crossed'] = True
         
-        # Update last seen time
-        self.vehicle_tracker[vehicle_id]['last_seen'] = datetime.now()
-        
         if self.current_light_state == 'red':
             if self.vehicle_tracker[vehicle_id]['green_crossed'] and self.vehicle_tracker[vehicle_id]['red_crossed']:
                 self.active_violations.add(vehicle_id)
@@ -289,25 +295,32 @@ class TrafficViolationDetector:
                         self.violation_count += 1
                         self.processed_violations.add(vehicle_id)
                 
-                violation_text = "XE VUOT DEN DO"
+                violation_text = "XE VƯỢT ĐÈN ĐỎ"
                 cv2.putText(frame, violation_text, 
                            (x1, y1 - 25), cv2.FONT_HERSHEY_SIMPLEX, 
-                           0.6, (0, 0, 255), 1)  # Smaller text
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 1)  # Thinner box
+                           0.6, (0, 0, 255), 1)
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 1)
             
             elif self.vehicle_tracker[vehicle_id]['green_crossed'] and not crossed_red:
-                warning_text = "CANH BAO"
+                warning_text = "CẢNH BÁO"
                 cv2.putText(frame, warning_text, 
                            (x1, y1 - 25), cv2.FONT_HERSHEY_SIMPLEX, 
                            0.6, (0, 255, 255), 1)
                 self.vehicle_tracker[vehicle_id]['warning_shown'] = True
         
         if vehicle_id in self.active_violations:
-            violation_text = "XE VUOT DEN DO"
-            cv2.putText(frame, violation_text, 
-                       (x1, y1 - 25), cv2.FONT_HERSHEY_SIMPLEX, 
-                       0.6, (0, 0, 255), 1)
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 1)
+            # Check if the violation should still be displayed (7 second timeout)
+            if self.vehicle_tracker[vehicle_id].get('violation_time'):
+                time_since_violation = datetime.now() - self.vehicle_tracker[vehicle_id]['violation_time']
+                if time_since_violation.total_seconds() <= self.violation_timeout:
+                    violation_text = "XE VƯỢT ĐÈN ĐỎ"
+                    cv2.putText(frame, violation_text, 
+                            (x1, y1 - 25), cv2.FONT_HERSHEY_SIMPLEX, 
+                            0.6, (0, 0, 255), 1)
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 1)
+                else:
+                    # Remove from active violations after timeout
+                    self.active_violations.remove(vehicle_id)
     
     def _clean_vehicle_tracker(self, current_frame_vehicles):
         current_time = datetime.now()
@@ -317,7 +330,17 @@ class TrafficViolationDetector:
             if vehicle_id not in current_frame_vehicles:
                 if vehicle_id in self.vehicle_tracker:
                     last_seen = self.vehicle_tracker[vehicle_id].get('last_seen', current_time)
-                    if (current_time - last_seen).total_seconds() > 1:  # Remove after 1 second
+                    time_since_last_seen = (current_time - last_seen).total_seconds()
+                    
+                    # Check if violation has timed out (7 seconds)
+                    violation_time = self.vehicle_tracker[vehicle_id].get('violation_time')
+                    if violation_time:
+                        time_since_violation = (current_time - violation_time).total_seconds()
+                        if time_since_violation > self.violation_timeout:
+                            vehicles_to_remove.add(vehicle_id)
+                    
+                    # Remove if not seen for more than 1 second
+                    if time_since_last_seen > 1:
                         vehicles_to_remove.add(vehicle_id)
                 else:
                     vehicles_to_remove.add(vehicle_id)
@@ -338,14 +361,14 @@ class TrafficViolationDetector:
         cv2.rectangle(frame, (10, 10), (350, 120), (0, 0, 0), -1)
         
         light_color = self.traffic_light_states[self.current_light_state]
-        cv2.putText(frame, f"Traffic Light:", (20, 35), 
+        cv2.putText(frame, f"Đèn tín hiệu:", (20, 35), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
         cv2.putText(frame, f"{self.current_light_state.upper()}", (20, 70), 
                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, light_color, 2)
         cv2.circle(frame, (250, 50), 12, light_color, -1)
         cv2.circle(frame, (250, 50), 14, (255, 255, 255), 1)
         
-        cv2.putText(frame, f"Tong vi pham:", (20, 100), 
+        cv2.putText(frame, f"Tổng vi phạm:", (20, 100), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
         cv2.putText(frame, f"{self.violation_count}", (250, 100), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
@@ -406,82 +429,354 @@ class TrafficViolationDetector:
         else:
             return 'unknown'
     
-    def process_video(self, video_path, output_dir='violations', skip_frames=0):
-        Path(output_dir).mkdir(parents=True, exist_ok=True)
-        cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened():
-            print(f"Error: Could not open video {video_path}")
-            return
-        
-        if skip_frames > 0:
-            for _ in range(skip_frames):
-                ret, _ = cap.read()
-                if not ret:
-                    print("Error skipping frames")
-                    return
-        
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        video_writer = cv2.VideoWriter(str(Path(output_dir) / 'output_video.mp4'),
-                                      cv2.VideoWriter_fourcc(*'mp4v'), fps, (width, height))
-        
-        csv_path = Path(output_dir) / 'detections.csv'
-        with open(csv_path, mode='w', newline='') as csv_file:
-            fieldnames = ['timestamp', 'frame_number', 'class_id', 'class_name', 
-                         'x1', 'y1', 'x2', 'y2', 'confidence', 'light_state', 'violation']
-            writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
-            writer.writeheader()
-            
-            frame_count = 0
-            last_violation_frame = None
-            
-            while cap.isOpened():
-                ret, frame = cap.read()
-                if not ret:
-                    break
-                
-                processed_frame, vehicles, light_state, has_violations = self.detect_vehicles_and_lights(frame)
-                frame_count += 1
-                
-                for vehicle in vehicles:
-                    x1, y1, x2, y2 = vehicle['bbox']
-                    vehicle_id = vehicle['id']
-                    violation = vehicle_id in self.active_violations
-                    
-                    writer.writerow({
-                        'timestamp': vehicle['timestamp'],
-                        'frame_number': frame_count,
-                        'class_id': vehicle['class_id'],
-                        'class_name': vehicle['class_name'],
-                        'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2,
-                        'confidence': vehicle['confidence'],
-                        'light_state': light_state,
-                        'violation': "YES" if violation else "NO"
-                    })
-                
-                video_writer.write(processed_frame)
-                
-                if has_violations:
-                    if last_violation_frame is None or frame_count - last_violation_frame >= int(fps):
-                        output_path = Path(output_dir) / f"violation_{frame_count:04d}.jpg"
-                        cv2.imwrite(str(output_path), processed_frame)
-                        last_violation_frame = frame_count
-                
-                cv2.imshow('Traffic Violation Detection', processed_frame)
-                if cv2.waitKey(1) & 0xFF == ord('q'):
-                    break
-        
-        cap.release()
-        video_writer.release()
-        cv2.destroyAllWindows()
-        print(f"Processing complete. Detected {self.violation_count} violations. Results saved to {output_dir}")
+    def reset_lines(self):
+        # Reset to default line positions
+        self.green_line = {
+            'x1': 300, 'y1': 750,
+            'x2': 1600, 'y2': 760
+        }
+        self.red_line = {
+            'x1': 300, 'y1': 500,
+            'x2': 1600, 'y2': 520
+        }
+        self.warning_zone = {
+            'x1': 300, 'y1': 400,
+            'x2': 1600, 'y2': 800
+        }
 
     def _get_class_color(self, class_id):
         colors = {1: (0, 255, 0), 3: (255, 0, 0), 5: (255, 255, 0), 7: (0, 255, 255)}
         return colors.get(class_id, (128, 128, 128))
 
+
+class TrafficViolationApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Hệ thống phát hiện vi phạm giao thông")
+        self.root.geometry("1280x800")
+        
+        # Initialize the detector
+        self.detector = TrafficViolationDetector()
+        
+        # Initialize video variables
+        self.video_path = None
+        self.cap = None
+        self.is_playing = False
+        self.processing_thread = None
+        self.frame_queue = queue.Queue(maxsize=30)
+        self.stop_event = threading.Event()
+        
+        # Frame display variables
+        self.current_frame = None
+        self.display_frame = None
+        self.frame_scale = 0.75
+        
+        # Variables for line drawing
+        self.is_drawing = False
+        self.drawing_line = None  # 'red' or 'green'
+        self.drawing_start_point = None
+        self.line_thickness = 2
+        self.line_tmp = None
+        
+        # Create UI components
+        self.create_ui()
+        
+        # Start the UI update loop
+        self.update_ui()
+    
+    def create_ui(self):
+        # Main frame
+        self.main_frame = ttk.Frame(self.root)
+        self.main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Controls frame (top)
+        self.controls_frame = ttk.Frame(self.main_frame)
+        self.controls_frame.pack(fill=tk.X, side=tk.TOP, pady=5)
+        
+        # File selection button
+        self.file_btn = ttk.Button(self.controls_frame, text="Tải video", command=self.load_video)
+        self.file_btn.pack(side=tk.LEFT, padx=5)
+        
+        # Play/Pause button
+        self.play_pause_btn = ttk.Button(self.controls_frame, text="Phát", command=self.toggle_play, state=tk.DISABLED)
+        self.play_pause_btn.pack(side=tk.LEFT, padx=5)
+        
+        # Draw red line button
+        self.draw_red_btn = ttk.Button(self.controls_frame, text="Vẽ vạch đỏ", command=lambda: self.start_drawing('red'))
+        self.draw_red_btn.pack(side=tk.LEFT, padx=5)
+        
+        # Draw green line button
+        self.draw_green_btn = ttk.Button(self.controls_frame, text="Vẽ vạch xanh", command=lambda: self.start_drawing('green'))
+        self.draw_green_btn.pack(side=tk.LEFT, padx=5)
+        
+        # Reset lines button
+        self.reset_lines_btn = ttk.Button(self.controls_frame, text="Đặt lại vạch", command=self.reset_lines)
+        self.reset_lines_btn.pack(side=tk.LEFT, padx=5)
+        
+        # Status information
+        self.status_label = ttk.Label(self.controls_frame, text="Chưa có video")
+        self.status_label.pack(side=tk.RIGHT, padx=5)
+        
+        # Frame display area (center)
+        self.canvas_frame = ttk.Frame(self.main_frame)
+        self.canvas_frame.pack(fill=tk.BOTH, expand=True, pady=5)
+        
+        # Canvas for displaying video
+        self.canvas = tk.Canvas(self.canvas_frame, bg="black")
+        self.canvas.pack(fill=tk.BOTH, expand=True)
+        
+        # Progress bar (bottom)
+        self.progress_frame = ttk.Frame(self.main_frame)
+        self.progress_frame.pack(fill=tk.X, side=tk.BOTTOM, pady=5)
+        
+        self.progress_bar = ttk.Progressbar(self.progress_frame, orient=tk.HORIZONTAL, length=100, mode='determinate')
+        self.progress_bar.pack(fill=tk.X, padx=5)
+        
+        # Status bar (bottom)
+        self.info_frame = ttk.Frame(self.main_frame)
+        self.info_frame.pack(fill=tk.X, side=tk.BOTTOM, pady=5)
+        
+        self.violation_count_label = ttk.Label(self.info_frame, text="Vi phạm: 0")
+        self.violation_count_label.pack(side=tk.LEFT, padx=5)
+        
+        self.light_state_label = ttk.Label(self.info_frame, text="Đèn: Chưa xác định")
+        self.light_state_label.pack(side=tk.LEFT, padx=5)
+        
+        # Bind canvas events for drawing
+        self.canvas.bind("<Button-1>", self.on_canvas_click)
+        self.canvas.bind("<B1-Motion>", self.on_canvas_drag)
+        self.canvas.bind("<ButtonRelease-1>", self.on_canvas_release)
+    
+    def load_video(self):
+        file_path = filedialog.askopenfilename(
+            title="Chọn video",
+            filetypes=[("Video files", "*.mp4 *.avi *.mov"), ("All files", "*.*")]
+        )
+        
+        if file_path:
+            self.video_path = file_path
+            self.status_label.config(text=f"Đã tải: {os.path.basename(file_path)}")
+            
+            # Open video
+            if self.cap is not None:
+                self.cap.release()
+            
+            self.cap = cv2.VideoCapture(file_path)
+            
+            if not self.cap.isOpened():
+                self.status_label.config(text="Lỗi: Không thể mở video")
+                return
+            
+            # Get video properties
+            self.frame_count = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            self.fps = self.cap.get(cv2.CAP_PROP_FPS)
+            self.video_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            self.video_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            
+            # Set canvas size based on video dimensions
+            self.set_canvas_size()
+            
+            # Enable play button
+            self.play_pause_btn.config(state=tk.NORMAL)
+            
+            # Read first frame to display
+            ret, frame = self.cap.read()
+            if ret:
+                self.current_frame = frame.copy()
+                self.display_frame_on_canvas(frame)
+    
+    def set_canvas_size(self):
+        # Calculate scaled dimensions
+        scaled_width = int(self.video_width * self.frame_scale)
+        scaled_height = int(self.video_height * self.frame_scale)
+        
+        # Update canvas size
+        self.canvas.config(width=scaled_width, height=scaled_height)
+    
+    def toggle_play(self):
+        if self.is_playing:
+            self.is_playing = False
+            self.play_pause_btn.config(text="Phát")
+            self.stop_event.set()
+        else:
+            if self.cap is not None:
+                self.is_playing = True
+                self.play_pause_btn.config(text="Tạm dừng")
+                self.stop_event.clear()
+                self.start_processing()
+    
+    def start_processing(self):
+        if self.processing_thread is not None and self.processing_thread.is_alive():
+            self.processing_thread.join()
+        
+        self.processing_thread = threading.Thread(target=self.process_video)
+        self.processing_thread.daemon = True
+        self.processing_thread.start()
+    
+    def process_video(self):
+        self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        frame_num = 0
+        
+        while self.is_playing and not self.stop_event.is_set():
+            ret, frame = self.cap.read()
+            if not ret:
+                break
+            
+            frame_num += 1
+            self.progress_bar['value'] = (frame_num / self.frame_count) * 100
+            
+            # Process frame
+            processed_frame, _, light_state, _ = self.detector.detect_vehicles_and_lights(frame)
+            
+            # Update current frame
+            self.current_frame = processed_frame.copy()
+            
+            # Put frame in queue for display
+            if self.frame_queue.full():
+                self.frame_queue.get()
+            self.frame_queue.put(processed_frame)
+            
+            # Control playback speed
+            time.sleep(1/self.fps)
+        
+        # When video ends or is stopped
+        if not self.stop_event.is_set():
+            self.is_playing = False
+            self.play_pause_btn.config(text="Phát")
+            self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+    
+    def display_frame_on_canvas(self, frame):
+        if frame is None:
+            return
+        
+        # Convert frame to RGB
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        
+        # Resize frame to fit canvas
+        canvas_width = self.canvas.winfo_width()
+        canvas_height = self.canvas.winfo_height()
+        
+        if canvas_width <= 1 or canvas_height <= 1:
+            return
+        
+        frame_resized = cv2.resize(frame_rgb, (canvas_width, canvas_height))
+        
+        # Convert to ImageTk format
+        img = Image.fromarray(frame_resized)
+        imgtk = ImageTk.PhotoImage(image=img)
+        
+        # Update canvas
+        self.canvas.imgtk = imgtk
+        self.canvas.create_image(0, 0, anchor=tk.NW, image=imgtk)
+    
+    def update_ui(self):
+        # Update frame display
+        if not self.frame_queue.empty():
+            frame = self.frame_queue.get()
+            self.display_frame_on_canvas(frame)
+        
+        # Update status information
+        self.violation_count_label.config(text=f"Vi phạm: {self.detector.violation_count}")
+        self.light_state_label.config(text=f"Đèn: {self.detector.current_light_state.upper()}")
+        
+        # Schedule next update
+        self.root.after(50, self.update_ui)
+    
+    def start_drawing(self, line_type):
+        self.is_drawing = True
+        self.drawing_line = line_type
+        self.status_label.config(text=f"Đang vẽ vạch {'đỏ' if line_type == 'red' else 'xanh'}. Nhấp và kéo trên video")
+    
+    def on_canvas_click(self, event):
+        if self.is_drawing:
+            self.drawing_start_point = (event.x, event.y)
+    
+    def on_canvas_drag(self, event):
+        if self.is_drawing and self.drawing_start_point:
+            # Create a temporary line while dragging
+            if self.line_tmp:
+                self.canvas.delete(self.line_tmp)
+            
+            x1, y1 = self.drawing_start_point
+            color = 'red' if self.drawing_line == 'red' else 'green'
+            self.line_tmp = self.canvas.create_line(
+                x1, y1, event.x, event.y,
+                fill=color, width=self.line_thickness
+            )
+    
+    def on_canvas_release(self, event):
+        if self.is_drawing and self.drawing_start_point:
+            x1, y1 = self.drawing_start_point
+            x2, y2 = event.x, event.y
+            
+            # Get canvas dimensions and video dimensions
+            canvas_width = self.canvas.winfo_width()
+            canvas_height = self.canvas.winfo_height()
+            video_width = self.video_width
+            video_height = self.video_height
+            
+            # Calculate scaling factors
+            scale_x = video_width / canvas_width
+            scale_y = video_height / canvas_height
+            
+            # Convert canvas coordinates to video coordinates
+            vid_x1 = int(x1 * scale_x)
+            vid_y1 = int(y1 * scale_y)
+            vid_x2 = int(x2 * scale_x)
+            vid_y2 = int(y2 * scale_y)
+            
+            # Update the detector's line
+            if self.drawing_line == 'red':
+                self.detector.red_line = {
+                    'x1': vid_x1, 'y1': vid_y1,
+                    'x2': vid_x2, 'y2': vid_y2
+                }
+            else:
+                self.detector.green_line = {
+                    'x1': vid_x1, 'y1': vid_y1,
+                    'x2': vid_x2, 'y2': vid_y2
+                }
+            
+            # Update warning zone between the lines
+            self.detector.warning_zone = {
+                'x1': min(vid_x1, vid_x2),
+                'y1': min(vid_y1, vid_y2),
+                'x2': max(vid_x1, vid_x2),
+                'y2': max(vid_y1, vid_y2)
+            }
+            
+            # Clean up
+            if self.line_tmp:
+                self.canvas.delete(self.line_tmp)
+                self.line_tmp = None
+            
+            self.is_drawing = False
+            self.drawing_start_point = None
+            self.status_label.config(text=f"Đã vẽ vạch {'đỏ' if self.drawing_line == 'red' else 'xanh'}")
+    
+    def reset_lines(self):
+        self.detector.reset_lines()
+        self.status_label.config(text="Đã đặt lại vạch về mặc định")
+    
+    def on_closing(self):
+        # Stop video processing
+        self.is_playing = False
+        self.stop_event.set()
+        
+        # Wait for processing thread to finish
+        if self.processing_thread is not None and self.processing_thread.is_alive():
+            self.processing_thread.join()
+        
+        # Release video capture
+        if self.cap is not None:
+            self.cap.release()
+        
+        # Destroy the window
+        self.root.destroy()
+
 if __name__ == "__main__":
-    detector = TrafficViolationDetector('yolov8m.pt')
-    video_path = 'data/videos/test2.mp4'
-    detector.process_video(video_path)
+    root = tk.Tk()
+    app = TrafficViolationApp(root)
+    root.protocol("WM_DELETE_WINDOW", app.on_closing)
+    root.mainloop()
+       
