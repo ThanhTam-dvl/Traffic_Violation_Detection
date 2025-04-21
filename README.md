@@ -1,1 +1,1 @@
-run file detection
+run: python detection.py
