@@ -12,6 +12,7 @@ from tkinter import filedialog, ttk
 from PIL import Image, ImageTk
 import threading
 import queue
+import torch
 
 class TrafficViolationDetector:
     def __init__(self, model_path='yolov8m.pt'):
@@ -22,6 +23,24 @@ class TrafficViolationDetector:
         self.last_known_light_state = 'unknown'
         self.last_light_detection_time = datetime.now()
         
+        # Add license plate detection models
+        try:
+            self.yolo_LP_detect = torch.hub.load(
+                'yolov5', 'custom', path='model/LP_detector.pt', force_reload=True, source='local'
+            )
+            self.yolo_license_plate = torch.hub.load(
+                'yolov5', 'custom', path='model/LP_ocr.pt', force_reload=True, source='local'
+            )
+            self.yolo_license_plate.conf = 0.6
+            self.license_plate_recognition_enabled = True
+        except Exception as e:
+            print(f"Error loading license plate models: {e}")
+            self.license_plate_recognition_enabled = False
+        
+        # Store detected plates
+        self.detected_plates = {}  # vehicle_id -> plate_number
+        self.violation_plates = []  # List of plates that violated rules
+
         # Default values for warning zone and lines
         self.warning_zone = {
             'x1': 300, 'y1': 400,  # Top-left corner
@@ -58,6 +77,44 @@ class TrafficViolationDetector:
         # Debug mode
         self.debug = False
     
+    def detect_license_plate(self, vehicle_crop):
+        if not self.license_plate_recognition_enabled:
+            return "LP detection disabled"
+        
+        try:
+            # Detect license plate in vehicle crop
+            plates = self.yolo_LP_detect(vehicle_crop, size=640)
+            list_plates = plates.pandas().xyxy[0].values.tolist()
+            
+            if not list_plates:
+                return "No plate detected"
+            
+            # Process the first detected plate
+            plate = list_plates[0]
+            x, y, w, h = int(plate[0]), int(plate[1]), int(plate[2] - plate[0]), int(plate[3] - plate[1])
+            
+            # Check if the coordinates are valid
+            if x < 0 or y < 0 or w <= 0 or h <= 0 or x+w > vehicle_crop.shape[1] or y+h > vehicle_crop.shape[0]:
+                return "Invalid plate coordinates"
+            
+            # Crop the license plate
+            plate_crop = vehicle_crop[y:y + h, x:x + w]
+            
+            # Import read_plate and deskew from your function module
+            from function.helper import read_plate
+            from function.utils_rotate import deskew
+            
+            # Read the plate text
+            lp_text = read_plate(self.yolo_license_plate, deskew(plate_crop, 1, 0))
+            
+            if lp_text == "unknown":
+                return "Unreadable plate"
+            
+            return lp_text
+        except Exception as e:
+            print(f"Error in license plate detection: {e}")
+            return "Error detecting plate"
+
     def detect_vehicles_and_lights(self, frame):
         scale_factor = 1.5
         frame_resized = cv2.resize(frame, None, fx=scale_factor, fy=scale_factor, interpolation=cv2.INTER_LINEAR)
@@ -269,7 +326,8 @@ class TrafficViolationDetector:
                 'position_history': [],
                 'last_bbox': (x1, y1, x2, y2),
                 'last_seen': datetime.now(),
-                'violation_time': None
+                'violation_time': None,
+                'license_plate': None
             }
         
         self.vehicle_tracker[vehicle_id]['position_history'].append((center_x, center_y))
@@ -287,25 +345,50 @@ class TrafficViolationDetector:
         if self.current_light_state == 'red':
             if self.vehicle_tracker[vehicle_id]['green_crossed'] and self.vehicle_tracker[vehicle_id]['red_crossed']:
                 self.active_violations.add(vehicle_id)
-                
+                    
                 if not self.vehicle_tracker[vehicle_id]['violation_recorded']:
                     self.vehicle_tracker[vehicle_id]['violation_recorded'] = True
                     self.vehicle_tracker[vehicle_id]['violation_time'] = datetime.now()
+                    
+                    # Capture license plate when violation occurs
+                    if self.license_plate_recognition_enabled and vehicle_id not in self.detected_plates:
+                        # Extract vehicle crop
+                        x1, y1, x2, y2 = self.vehicle_tracker[vehicle_id]['last_bbox']
+                        vehicle_crop = frame[y1:y2, x1:x2]
+                        
+                        # Detect license plate
+                        if vehicle_crop.size > 0:
+                            plate_text = self.detect_license_plate(vehicle_crop)
+                            self.vehicle_tracker[vehicle_id]['license_plate'] = plate_text
+                            self.detected_plates[vehicle_id] = plate_text
+                            
+                            # Add to violation plates list if not already in it
+                            if plate_text not in ["No plate detected", "Unreadable plate", "LP detection disabled", "Error detecting plate"]:
+                                if plate_text not in self.violation_plates:
+                                    self.violation_plates.append(plate_text)
+                    
                     if vehicle_id not in self.processed_violations:
                         self.violation_count += 1
                         self.processed_violations.add(vehicle_id)
+                    
+                # Display plate info if available
+                license_plate = self.vehicle_tracker[vehicle_id].get('license_plate', 'Unknown')
+                if license_plate and license_plate not in ["No plate detected", "Unreadable plate", "LP detection disabled", "Error detecting plate"]:
+                    cv2.putText(frame, f"BS: {license_plate}", 
+                            (x1, y1 - 40), cv2.FONT_HERSHEY_SIMPLEX, 
+                            0.5, (0, 255, 255), 1)
                 
                 violation_text = "XE VUOT DEN DO"
                 cv2.putText(frame, violation_text, 
-                           (x1, y1 - 25), cv2.FONT_HERSHEY_SIMPLEX, 
-                           0.6, (0, 0, 255), 1)
+                        (x1, y1 - 25), cv2.FONT_HERSHEY_SIMPLEX, 
+                        0.6, (0, 0, 255), 1)
                 cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 1)
             
             elif self.vehicle_tracker[vehicle_id]['green_crossed'] and not crossed_red:
                 warning_text = "CANH BAO"
                 cv2.putText(frame, warning_text, 
-                           (x1, y1 - 25), cv2.FONT_HERSHEY_SIMPLEX, 
-                           0.6, (0, 255, 255), 1)
+                        (x1, y1 - 25), cv2.FONT_HERSHEY_SIMPLEX, 
+                        0.6, (0, 255, 255), 1)
                 self.vehicle_tracker[vehicle_id]['warning_shown'] = True
         
         if vehicle_id in self.active_violations:
@@ -317,6 +400,14 @@ class TrafficViolationDetector:
                     cv2.putText(frame, violation_text, 
                             (x1, y1 - 25), cv2.FONT_HERSHEY_SIMPLEX, 
                             0.6, (0, 0, 255), 1)
+                    
+                    # Display plate info if available
+                    license_plate = self.vehicle_tracker[vehicle_id].get('license_plate', 'Unknown')
+                    if license_plate and license_plate not in ["No plate detected", "Unreadable plate", "LP detection disabled", "Error detecting plate"]:
+                        cv2.putText(frame, f"BS: {license_plate}", 
+                                (x1, y1 - 40), cv2.FONT_HERSHEY_SIMPLEX, 
+                                0.5, (0, 255, 255), 1)
+                    
                     cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 1)
                 else:
                     # Remove from active violations after timeout
@@ -501,6 +592,10 @@ class TrafficViolationApp:
         self.play_pause_btn = ttk.Button(self.controls_frame, text="Phát", command=self.toggle_play, state=tk.DISABLED)
         self.play_pause_btn.pack(side=tk.LEFT, padx=5)
         
+        # Load image for license plate testing
+        self.image_btn = ttk.Button(self.controls_frame, text="Test biển số", command=self.load_test_image)
+        self.image_btn.pack(side=tk.LEFT, padx=5)
+        
         # Draw red line button
         self.draw_red_btn = ttk.Button(self.controls_frame, text="Vẽ vạch đỏ", command=lambda: self.start_drawing('red'))
         self.draw_red_btn.pack(side=tk.LEFT, padx=5)
@@ -513,17 +608,51 @@ class TrafficViolationApp:
         self.reset_lines_btn = ttk.Button(self.controls_frame, text="Đặt lại vạch", command=self.reset_lines)
         self.reset_lines_btn.pack(side=tk.LEFT, padx=5)
         
+        # Toggle license plate detection
+        self.lp_detection_var = tk.BooleanVar(value=True)
+        self.lp_detection_check = ttk.Checkbutton(self.controls_frame, text="Nhận diện biển số", 
+                                                variable=self.lp_detection_var,
+                                                command=self.toggle_license_plate_detection)
+        self.lp_detection_check.pack(side=tk.LEFT, padx=5)
+        
         # Status information
         self.status_label = ttk.Label(self.controls_frame, text="Chưa có video")
         self.status_label.pack(side=tk.RIGHT, padx=5)
         
-        # Frame display area (center)
-        self.canvas_frame = ttk.Frame(self.main_frame)
-        self.canvas_frame.pack(fill=tk.BOTH, expand=True, pady=5)
+        # Create main content panel with video on left and data on right
+        self.content_frame = ttk.Frame(self.main_frame)
+        self.content_frame.pack(fill=tk.BOTH, expand=True, pady=5)
+        
+        # Left panel for video
+        self.left_panel = ttk.Frame(self.content_frame)
+        self.left_panel.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         
         # Canvas for displaying video
-        self.canvas = tk.Canvas(self.canvas_frame, bg="black")
+        self.canvas = tk.Canvas(self.left_panel, bg="black")
         self.canvas.pack(fill=tk.BOTH, expand=True)
+        
+        # Right panel for violation data
+        self.right_panel = ttk.Frame(self.content_frame, width=300)
+        self.right_panel.pack(side=tk.RIGHT, fill=tk.BOTH, padx=5)
+        self.right_panel.pack_propagate(False)  # Prevent panel from shrinking
+        
+        # Violation data frame
+        self.data_frame = ttk.LabelFrame(self.right_panel, text="Biển số xe vi phạm")
+        self.data_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Scrollable list for license plates
+        self.scrollbar = ttk.Scrollbar(self.data_frame)
+        self.scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        self.plate_listbox = tk.Listbox(self.data_frame, height=20, width=25, 
+                                    yscrollcommand=self.scrollbar.set)
+        self.plate_listbox.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        self.scrollbar.config(command=self.plate_listbox.yview)
+        
+        # Export button
+        self.export_btn = ttk.Button(self.right_panel, text="Xuất danh sách biển số", 
+                                    command=self.export_license_plates)
+        self.export_btn.pack(fill=tk.X, padx=5, pady=5)
         
         # Progress bar (bottom)
         self.progress_frame = ttk.Frame(self.main_frame)
@@ -536,10 +665,10 @@ class TrafficViolationApp:
         self.info_frame = ttk.Frame(self.main_frame)
         self.info_frame.pack(fill=tk.X, side=tk.BOTTOM, pady=5)
         
-        self.violation_count_label = ttk.Label(self.info_frame, text="Vi pham: 0")
+        self.violation_count_label = ttk.Label(self.info_frame, text="Vi phạm: 0")
         self.violation_count_label.pack(side=tk.LEFT, padx=5)
         
-        self.light_state_label = ttk.Label(self.info_frame, text="Den: chua xac dinh")
+        self.light_state_label = ttk.Label(self.info_frame, text="Đèn: chưa xác định")
         self.light_state_label.pack(side=tk.LEFT, padx=5)
         
         # Bind canvas events for drawing
@@ -593,6 +722,104 @@ class TrafficViolationApp:
         # Update canvas size
         self.canvas.config(width=scaled_width, height=scaled_height)
     
+    def toggle_license_plate_detection(self):
+        self.detector.license_plate_recognition_enabled = self.lp_detection_var.get()
+        status = "bật" if self.detector.license_plate_recognition_enabled else "tắt"
+        self.status_label.config(text=f"Nhận diện biển số: {status}")
+
+    def export_license_plates(self):
+        if not self.detector.violation_plates:
+            self.status_label.config(text="Không có biển số để xuất")
+            return
+        
+        try:
+            file_path = filedialog.asksaveasfilename(
+                defaultextension=".csv",
+                filetypes=[("CSV files", "*.csv"), ("Text files", "*.txt"), ("All files", "*.*")],
+                title="Lưu danh sách biển số"
+            )
+            
+            if not file_path:
+                return
+            
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write("STT,Biển số xe,Thời gian\n")
+                for i, plate in enumerate(self.detector.violation_plates):
+                    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    f.write(f"{i+1},{plate},{timestamp}\n")
+            
+            self.status_label.config(text=f"Đã xuất danh sách biển số: {file_path}")
+        except Exception as e:
+            self.status_label.config(text=f"Lỗi khi xuất file: {e}")
+
+    def load_test_image(self):
+        file_path = filedialog.askopenfilename(
+            title="Chọn ảnh",
+            filetypes=[("Image files", "*.jpg *.jpeg *.png"), ("All files", "*.*")]
+        )
+        
+        if not file_path:
+            return
+        
+        try:
+            # Kiểm tra xem tính năng nhận diện biển số có được bật hay không
+            if not self.detector.license_plate_recognition_enabled:
+                self.status_label.config(text="Nhận diện biển số bị tắt hoặc lỗi khởi tạo mô hình")
+                return
+
+            # Import các hàm cần thiết
+            from function.helper import read_plate
+            from function.utils_rotate import deskew
+            
+            # Đọc ảnh
+            img = cv2.imread(file_path)
+            if img is None:
+                self.status_label.config(text="Không thể đọc file ảnh")
+                return
+            
+            # Hiển thị ảnh
+            self.current_frame = img.copy()
+            self.display_frame_on_canvas(img)
+            
+            # Xử lý ảnh để phát hiện biển số
+            plates = self.detector.yolo_LP_detect(img, size=640)
+            list_plates = plates.pandas().xyxy[0].values.tolist()
+            
+            if not list_plates:
+                self.status_label.config(text="Không phát hiện biển số trong ảnh")
+                return
+            
+            # Xử lý các biển số được phát hiện
+            result_img = img.copy()
+            detected_plates = []
+            
+            for plate in list_plates:
+                x, y, w, h = int(plate[0]), int(plate[1]), int(plate[2] - plate[0]), int(plate[3] - plate[1])
+                crop_img = img[y:y + h, x:x + w]
+                
+                # Đọc nội dung biển số
+                lp_text = read_plate(self.detector.yolo_license_plate, deskew(crop_img, 1, 0))
+                
+                if lp_text != "unknown":
+                    detected_plates.append(lp_text)
+                    # Vẽ thông tin lên ảnh
+                    cv2.putText(result_img, lp_text, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                    cv2.rectangle(result_img, (x, y), (x + w, y + h), (255, 0, 0), 2)
+            
+            # Cập nhật hiển thị với ảnh đã được đánh dấu
+            self.current_frame = result_img.copy()
+            self.display_frame_on_canvas(result_img)
+            
+            # Thêm các biển số được phát hiện vào danh sách
+            for plate in detected_plates:
+                if plate not in self.detector.violation_plates:
+                    self.detector.violation_plates.append(plate)
+                    self.plate_listbox.insert(tk.END, plate)
+            
+            self.status_label.config(text=f"Phát hiện {len(detected_plates)} biển số trong ảnh")
+        except Exception as e:
+            self.status_label.config(text=f"Lỗi xử lý ảnh: {e}")
+
     def toggle_play(self):
         if self.is_playing:
             self.is_playing = False
@@ -678,6 +905,12 @@ class TrafficViolationApp:
         # Update status information
         self.violation_count_label.config(text=f"Vi phạm: {self.detector.violation_count}")
         self.light_state_label.config(text=f"Đèn: {self.detector.current_light_state.upper()}")
+        
+        # Update the license plate listbox
+        current_plates = list(self.plate_listbox.get(0, tk.END))
+        for plate in self.detector.violation_plates:
+            if plate not in current_plates:
+                self.plate_listbox.insert(tk.END, plate)
         
         # Schedule next update
         self.root.after(50, self.update_ui)
