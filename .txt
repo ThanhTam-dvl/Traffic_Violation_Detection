@@ -18,3 +18,134 @@ red_line_end = (1200, 550)
 # Vùng xanh - ranh giới thứ hai
 blue_line_start = (400, 700)
 blue_line_end = (1200, 700)
+
+
+# CODE CŨ (bị lỗi ở đường vạch phát hiện các xe đứng ở vạch ngang hết màn hình)
+def _check_violations(self, vehicle, frame):
+        vehicle_id = vehicle['id']
+        center_x, center_y = vehicle['center']
+        x1, y1, x2, y2 = vehicle['bbox']
+        
+        # Update vehicle data
+        self.vehicle_tracker[vehicle_id]['last_bbox'] = (x1, y1, x2, y2)
+        self.vehicle_tracker[vehicle_id]['last_seen'] = datetime.now()
+        
+        if 'green_crossed' not in self.vehicle_tracker[vehicle_id]:
+            self.vehicle_tracker[vehicle_id] = {
+                'green_crossed': False,
+                'red_crossed': False,
+                'violation_recorded': False,
+                'warning_shown': False,
+                'first_seen': datetime.now(),
+                'position_history': [],
+                'last_bbox': (x1, y1, x2, y2),
+                'last_seen': datetime.now(),
+                'violation_time': None,
+                'license_plate': None,
+                'plate_detection_attempted': False  # Thêm cờ kiểm tra đã thử nhận diện biển số chưa
+            }
+        
+        self.vehicle_tracker[vehicle_id]['position_history'].append((center_x, center_y))
+        if len(self.vehicle_tracker[vehicle_id]['position_history']) > 10:
+            self.vehicle_tracker[vehicle_id]['position_history'].pop(0)
+        
+        crossed_green = y2 >= self.green_line['y1']
+        crossed_red = y1 <= self.red_line['y2']
+        
+        if crossed_green:
+            self.vehicle_tracker[vehicle_id]['green_crossed'] = True
+        if crossed_red:
+            self.vehicle_tracker[vehicle_id]['red_crossed'] = True
+        
+        if self.current_light_state == 'red':
+            if self.vehicle_tracker[vehicle_id]['green_crossed'] and self.vehicle_tracker[vehicle_id]['red_crossed']:
+                self.active_violations.add(vehicle_id)
+                    
+                if not self.vehicle_tracker[vehicle_id]['violation_recorded']:
+                    self.vehicle_tracker[vehicle_id]['violation_recorded'] = True
+                    self.vehicle_tracker[vehicle_id]['violation_time'] = datetime.now()
+                    
+                    # Cải tiến phần nhận diện biển số
+                    if (self.license_plate_recognition_enabled and 
+                        not self.vehicle_tracker[vehicle_id]['plate_detection_attempted']):
+                        
+                        # Lấy vùng xe để nhận diện biển số
+                        x1, y1, x2, y2 = self.vehicle_tracker[vehicle_id]['last_bbox']
+                        vehicle_crop = frame[y1:y2, x1:x2]
+                        
+                        # Kiểm tra kích thước vùng xe hợp lệ
+                        if vehicle_crop.size > 0 and vehicle_crop.shape[0] > 30 and vehicle_crop.shape[1] > 30:
+                            try:
+                                # Tiền xử lý ảnh để cải thiện nhận diện
+                                gray = cv2.cvtColor(vehicle_crop, cv2.COLOR_BGR2GRAY)
+                                blurred = cv2.GaussianBlur(gray, (3, 3), 0)
+                                _, threshold = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                                vehicle_crop_processed = cv2.cvtColor(threshold, cv2.COLOR_GRAY2BGR)
+                                
+                                # Nhận diện biển số
+                                plate_text = self.detect_license_plate(vehicle_crop_processed)
+                                
+                                # Nếu không nhận diện được, thử với ảnh gốc
+                                if plate_text in ["No plate detected", "Unreadable plate"]:
+                                    plate_text = self.detect_license_plate(vehicle_crop)
+                                
+                                self.vehicle_tracker[vehicle_id]['license_plate'] = plate_text
+                                self.detected_plates[vehicle_id] = plate_text
+                                
+                                # Thêm vào danh sách vi phạm nếu biển số hợp lệ
+                                if plate_text not in ["No plate detected", "Unreadable plate", "LP detection disabled", "Error detecting plate"]:
+                                    if plate_text not in self.violation_plates:
+                                        self.violation_plates.append(plate_text)
+                                        # Thêm timestamp cho biển số vi phạm
+                                        violation_time = datetime.now().strftime("%H:%M:%S")
+                                        plate_with_time = f"{plate_text} ({violation_time})"
+                                        self.plate_listbox.insert(tk.END, plate_with_time)
+                            except Exception as e:
+                                print(f"Lỗi khi xử lý biển số: {e}")
+                                self.vehicle_tracker[vehicle_id]['license_plate'] = "Error detecting plate"
+                        
+                        self.vehicle_tracker[vehicle_id]['plate_detection_attempted'] = True
+                    
+                    if vehicle_id not in self.processed_violations:
+                        self.violation_count += 1
+                        self.processed_violations.add(vehicle_id)
+                
+                # Hiển thị thông tin biển số nếu có
+                license_plate = self.vehicle_tracker[vehicle_id].get('license_plate', 'Unknown')
+                if license_plate and license_plate not in ["No plate detected", "Unreadable plate", "LP detection disabled", "Error detecting plate"]:
+                    cv2.putText(frame, f"BS: {license_plate}", 
+                            (x1, y1 - 40), cv2.FONT_HERSHEY_SIMPLEX, 
+                            0.5, (0, 255, 255), 1)
+                
+                violation_text = "XE VUOT DEN DO"
+                cv2.putText(frame, violation_text, 
+                        (x1, y1 - 25), cv2.FONT_HERSHEY_SIMPLEX, 
+                        0.6, (0, 0, 255), 1)
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 1)
+            
+            elif self.vehicle_tracker[vehicle_id]['green_crossed'] and not crossed_red:
+                warning_text = "CANH BAO"
+                cv2.putText(frame, warning_text, 
+                        (x1, y1 - 25), cv2.FONT_HERSHEY_SIMPLEX, 
+                        0.6, (0, 255, 255), 1)
+                self.vehicle_tracker[vehicle_id]['warning_shown'] = True
+        
+        # Hiển thị vi phạm trong thời gian timeout
+        if vehicle_id in self.active_violations:
+            if self.vehicle_tracker[vehicle_id].get('violation_time'):
+                time_since_violation = datetime.now() - self.vehicle_tracker[vehicle_id]['violation_time']
+                if time_since_violation.total_seconds() <= self.violation_timeout:
+                    violation_text = "XE VUOT DEN DO"
+                    cv2.putText(frame, violation_text, 
+                            (x1, y1 - 25), cv2.FONT_HERSHEY_SIMPLEX, 
+                            0.6, (0, 0, 255), 1)
+                    
+                    license_plate = self.vehicle_tracker[vehicle_id].get('license_plate', 'Unknown')
+                    if license_plate and license_plate not in ["No plate detected", "Unreadable plate", "LP detection disabled", "Error detecting plate"]:
+                        cv2.putText(frame, f"BS: {license_plate}", 
+                                (x1, y1 - 40), cv2.FONT_HERSHEY_SIMPLEX, 
+                                0.5, (0, 255, 255), 1)
+                    
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 1)
+                else:
+                    self.active_violations.remove(vehicle_id)

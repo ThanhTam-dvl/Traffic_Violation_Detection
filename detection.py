@@ -327,15 +327,27 @@ class TrafficViolationDetector:
                 'last_bbox': (x1, y1, x2, y2),
                 'last_seen': datetime.now(),
                 'violation_time': None,
-                'license_plate': None
+                'license_plate': None,
+                'plate_detection_attempted': False
             }
         
         self.vehicle_tracker[vehicle_id]['position_history'].append((center_x, center_y))
         if len(self.vehicle_tracker[vehicle_id]['position_history']) > 10:
             self.vehicle_tracker[vehicle_id]['position_history'].pop(0)
         
-        crossed_green = y2 >= self.green_line['y1']
-        crossed_red = y1 <= self.red_line['y2']
+        # Kiểm tra xe có nằm trong vùng cảnh báo không (theo chiều ngang)
+        vehicle_in_warning_zone_x = (x1 >= self.warning_zone['x1'] and x2 <= self.warning_zone['x2'])
+        
+        # Chỉ kiểm tra vượt vạch nếu xe nằm trong vùng cảnh báo theo chiều ngang
+        crossed_green = False
+        crossed_red = False
+        
+        if vehicle_in_warning_zone_x:
+            # Kiểm tra vượt vạch xanh (chỉ khi xe nằm trong vùng ngang)
+            crossed_green = y2 >= self.green_line['y1'] and y2 <= self.green_line['y1'] + 20
+            
+            # Kiểm tra vượt vạch đỏ (chỉ khi xe nằm trong vùng ngang)
+            crossed_red = y1 <= self.red_line['y2'] and y1 >= self.red_line['y2'] - 20
         
         if crossed_green:
             self.vehicle_tracker[vehicle_id]['green_crossed'] = True
@@ -343,35 +355,52 @@ class TrafficViolationDetector:
             self.vehicle_tracker[vehicle_id]['red_crossed'] = True
         
         if self.current_light_state == 'red':
-            if self.vehicle_tracker[vehicle_id]['green_crossed'] and self.vehicle_tracker[vehicle_id]['red_crossed']:
+            if vehicle_in_warning_zone_x and self.vehicle_tracker[vehicle_id]['green_crossed'] and self.vehicle_tracker[vehicle_id]['red_crossed']:
                 self.active_violations.add(vehicle_id)
                     
                 if not self.vehicle_tracker[vehicle_id]['violation_recorded']:
                     self.vehicle_tracker[vehicle_id]['violation_recorded'] = True
                     self.vehicle_tracker[vehicle_id]['violation_time'] = datetime.now()
                     
-                    # Capture license plate when violation occurs
-                    if self.license_plate_recognition_enabled and vehicle_id not in self.detected_plates:
-                        # Extract vehicle crop
+                    # Phần nhận diện biển số giữ nguyên như trước
+                    if (self.license_plate_recognition_enabled and 
+                        not self.vehicle_tracker[vehicle_id]['plate_detection_attempted']):
+                        
                         x1, y1, x2, y2 = self.vehicle_tracker[vehicle_id]['last_bbox']
                         vehicle_crop = frame[y1:y2, x1:x2]
                         
-                        # Detect license plate
-                        if vehicle_crop.size > 0:
-                            plate_text = self.detect_license_plate(vehicle_crop)
-                            self.vehicle_tracker[vehicle_id]['license_plate'] = plate_text
-                            self.detected_plates[vehicle_id] = plate_text
-                            
-                            # Add to violation plates list if not already in it
-                            if plate_text not in ["No plate detected", "Unreadable plate", "LP detection disabled", "Error detecting plate"]:
-                                if plate_text not in self.violation_plates:
-                                    self.violation_plates.append(plate_text)
+                        if vehicle_crop.size > 0 and vehicle_crop.shape[0] > 30 and vehicle_crop.shape[1] > 30:
+                            try:
+                                gray = cv2.cvtColor(vehicle_crop, cv2.COLOR_BGR2GRAY)
+                                blurred = cv2.GaussianBlur(gray, (3, 3), 0)
+                                _, threshold = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                                vehicle_crop_processed = cv2.cvtColor(threshold, cv2.COLOR_GRAY2BGR)
+                                
+                                plate_text = self.detect_license_plate(vehicle_crop_processed)
+                                
+                                if plate_text in ["No plate detected", "Unreadable plate"]:
+                                    plate_text = self.detect_license_plate(vehicle_crop)
+                                
+                                self.vehicle_tracker[vehicle_id]['license_plate'] = plate_text
+                                self.detected_plates[vehicle_id] = plate_text
+                                
+                                if plate_text not in ["No plate detected", "Unreadable plate", "LP detection disabled", "Error detecting plate"]:
+                                    if plate_text not in self.violation_plates:
+                                        self.violation_plates.append(plate_text)
+                                        violation_time = datetime.now().strftime("%H:%M:%S")
+                                        plate_with_time = f"{plate_text} ({violation_time})"
+                                        self.plate_listbox.insert(tk.END, plate_with_time)
+                            except Exception as e:
+                                print(f"Lỗi khi xử lý biển số: {e}")
+                                self.vehicle_tracker[vehicle_id]['license_plate'] = "Error detecting plate"
+                        
+                        self.vehicle_tracker[vehicle_id]['plate_detection_attempted'] = True
                     
                     if vehicle_id not in self.processed_violations:
                         self.violation_count += 1
                         self.processed_violations.add(vehicle_id)
-                    
-                # Display plate info if available
+                
+                # Hiển thị thông tin vi phạm
                 license_plate = self.vehicle_tracker[vehicle_id].get('license_plate', 'Unknown')
                 if license_plate and license_plate not in ["No plate detected", "Unreadable plate", "LP detection disabled", "Error detecting plate"]:
                     cv2.putText(frame, f"BS: {license_plate}", 
@@ -384,15 +413,15 @@ class TrafficViolationDetector:
                         0.6, (0, 0, 255), 1)
                 cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 1)
             
-            elif self.vehicle_tracker[vehicle_id]['green_crossed'] and not crossed_red:
+            elif vehicle_in_warning_zone_x and self.vehicle_tracker[vehicle_id]['green_crossed'] and not crossed_red:
                 warning_text = "CANH BAO"
                 cv2.putText(frame, warning_text, 
                         (x1, y1 - 25), cv2.FONT_HERSHEY_SIMPLEX, 
                         0.6, (0, 255, 255), 1)
                 self.vehicle_tracker[vehicle_id]['warning_shown'] = True
         
+        # Hiển thị vi phạm trong thời gian timeout
         if vehicle_id in self.active_violations:
-            # Check if the violation should still be displayed (7 second timeout)
             if self.vehicle_tracker[vehicle_id].get('violation_time'):
                 time_since_violation = datetime.now() - self.vehicle_tracker[vehicle_id]['violation_time']
                 if time_since_violation.total_seconds() <= self.violation_timeout:
@@ -401,7 +430,6 @@ class TrafficViolationDetector:
                             (x1, y1 - 25), cv2.FONT_HERSHEY_SIMPLEX, 
                             0.6, (0, 0, 255), 1)
                     
-                    # Display plate info if available
                     license_plate = self.vehicle_tracker[vehicle_id].get('license_plate', 'Unknown')
                     if license_plate and license_plate not in ["No plate detected", "Unreadable plate", "LP detection disabled", "Error detecting plate"]:
                         cv2.putText(frame, f"BS: {license_plate}", 
@@ -410,7 +438,6 @@ class TrafficViolationDetector:
                     
                     cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 1)
                 else:
-                    # Remove from active violations after timeout
                     self.active_violations.remove(vehicle_id)
     
     def _clean_vehicle_tracker(self, current_frame_vehicles):
